@@ -1,10 +1,10 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { ArrowLeft } from "lucide-react"
-import { type Card, Suit } from "@/components/card-game"
+import { type Card, Suit, VALID_RANKS, rankValue } from "@/components/card-game"
 import { PlayerHand } from "@/components/player-hand"
-import { getBotDefenseMove } from "@/lib/bot-ai"
+import { getBotDefenseMove, generateBotMove } from "@/lib/bot-ai"
 
 interface GameBoardProps {
   userInfo: any
@@ -12,8 +12,6 @@ interface GameBoardProps {
   botDifficulty?: "easy" | "medium" | "hard"
   onExitGame: () => void
 }
-
-const VALID_RANKS = ["6", "7", "8", "9", "10", "J", "Q", "K", "A"]
 
 export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExitGame }: GameBoardProps) {
   const [gameActive, setGameActive] = useState(true)
@@ -30,8 +28,25 @@ export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExit
   const [roundCount, setRoundCount] = useState(0)
   const [playerRole, setPlayerRole] = useState<"attacker" | "defender">("attacker")
   const [botRole, setBotRole] = useState<"attacker" | "defender">("defender")
-  const [attackCount, setAttackCount] = useState(0) // Track number of attacks in round
-  const [defenderPassed, setDefenderPassed] = useState(false) // Track if bot passed on attacking
+  const [botThinking, setBotThinking] = useState(false)
+  const [playerSafe, setPlayerSafe] = useState(false)
+  const [botSafe, setBotSafe] = useState(false)
+
+  const handRef = useRef<Card[]>([])
+  const botHandRef = useRef<Card[]>([])
+  const deckRef = useRef<Card[]>([])
+
+  useEffect(() => {
+    handRef.current = hand
+  }, [hand])
+
+  useEffect(() => {
+    botHandRef.current = botHand
+  }, [botHand])
+
+  useEffect(() => {
+    deckRef.current = deck
+  }, [deck])
 
   useEffect(() => {
     const suits = [Suit.Hearts, Suit.Diamonds, Suit.Clubs, Suit.Spades]
@@ -76,18 +91,6 @@ export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExit
     setGameMessage(playerAttacksFirst ? "You attack first. Play a card." : "Bot attacks. Prepare to defend.")
   }, [])
 
-  const rankValue: Record<string, number> = {
-    "6": 6,
-    "7": 7,
-    "8": 8,
-    "9": 9,
-    "10": 10,
-    J: 11,
-    Q: 12,
-    K: 13,
-    A: 14,
-  }
-
   const canBeat = (attackCard: Card, defendCard: Card): boolean => {
     if (defendCard.suit === trumpCard?.suit && attackCard.suit !== trumpCard.suit) return true
     if (defendCard.suit !== attackCard.suit) return false
@@ -95,17 +98,71 @@ export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExit
   }
 
   const handlePlayCard = (cardIndex: number) => {
-    if (!isPlayerAttacking || !gameActive) {
-      setGameMessage("You must defend, not attack")
+    console.log("[v0] handlePlayCard called", { cardIndex, gameActive, playerRole, handLength: hand.length })
+
+    if (!gameActive) {
+      console.log("[v0] Game not active, blocking play")
+      setGameMessage("Wait for the round to start!")
       return
     }
 
     const card = hand[cardIndex]
     const newTableCards = [...tableCards]
 
-    const maxAttacks = botHand.length
-    if (newTableCards.length >= maxAttacks) {
-      setGameMessage(`Maximum attacks reached (${maxAttacks})`)
+    if (playerRole === "defender") {
+      console.log("[v0] Player is defender, attempting to defend")
+      const undefendedPair = newTableCards.find((pair) => !pair.defend)
+
+      console.log("[v0] Undefended pair:", undefendedPair)
+
+      if (!undefendedPair) {
+        setGameMessage("All attacks are defended!")
+        return
+      }
+
+      const canDefend = canBeat(undefendedPair.attack, card)
+      console.log("[v0] Can defend?", {
+        attack: undefendedPair.attack,
+        defend: card,
+        canDefend,
+        trumpCard,
+      })
+
+      if (!canDefend) {
+        setGameMessage("This card cannot beat the attack!")
+        return
+      }
+
+      undefendedPair.defend = card
+      setTableCards([...newTableCards])
+      setHand(hand.filter((_, idx) => idx !== cardIndex))
+      setSelectedCardIndex(null)
+
+      const allDefended = newTableCards.every((pair) => pair.defend)
+      if (allDefended) {
+        setGameMessage("All defended! Bot can throw in more or pass.")
+        setBotThinking(true)
+        setTimeout(() => {
+          setBotThinking(false)
+          botThrowInOrPass(newTableCards)
+        }, 1500)
+      } else {
+        setGameMessage("Defend remaining attacks!")
+      }
+      return
+    }
+
+    if (playerRole !== "attacker") {
+      console.log("[v0] Player is not attacker, blocking play")
+      setGameMessage("You must defend, not attack!")
+      return
+    }
+
+    console.log("[v0] Player is attacker, attempting to attack")
+
+    const undefendedCards = newTableCards.filter((pair) => !pair.defend).length
+    if (undefendedCards >= botHand.length) {
+      setGameMessage(`Maximum attacks reached (defender has ${botHand.length} cards)`)
       return
     }
 
@@ -126,28 +183,62 @@ export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExit
     setTableCards(newTableCards)
     setHand(hand.filter((_, idx) => idx !== cardIndex))
     setSelectedCardIndex(null)
-    setAttackCount(newTableCards.length) // Update attack count
 
-    setIsPlayerAttacking(false)
     setGameMessage("Bot is defending...")
+    setBotThinking(true)
 
-    setTimeout(() => simulateBotDefense(newTableCards), 1000)
+    setTimeout(() => {
+      setBotThinking(false)
+      simulateBotDefense(newTableCards)
+    }, 1000)
+  }
+
+  const botThrowInOrPass = (currentTable: Array<{ attack: Card; defend?: Card }>) => {
+    const undefendedCards = currentTable.filter((pair) => !pair.defend).length
+    if (undefendedCards >= handRef.current.length) {
+      setGameMessage("Round complete! You defended successfully.")
+      setGameActive(false)
+      setTimeout(() => endRound("defender-wins", handRef.current, botHandRef.current, deckRef.current), 1500)
+      return
+    }
+
+    const validRanks = new Set<string>()
+    currentTable.forEach((pair) => {
+      validRanks.add(pair.attack.rank)
+      if (pair.defend) validRanks.add(pair.defend.rank)
+    })
+
+    const matchingCards = botHandRef.current.filter((c) => validRanks.has(c.rank))
+
+    if (matchingCards.length === 0 || Math.random() > 0.7) {
+      setGameMessage("Bot passes. Round complete!")
+      setGameActive(false)
+      setTimeout(() => endRound("defender-wins", handRef.current, botHandRef.current, deckRef.current), 1500)
+      return
+    }
+
+    const throwInCard = matchingCards[Math.floor(Math.random() * matchingCards.length)]
+    const newTable = [...currentTable, { attack: throwInCard }]
+    const newBotHand = botHandRef.current.filter((c) => c !== throwInCard)
+
+    setTableCards(newTable)
+    setBotHand(newBotHand)
+    setGameMessage("Bot threw in another card! Defend it.")
   }
 
   const simulateBotDefense = (currentTable: Array<{ attack: Card; defend?: Card }>) => {
     const undefendedCards = currentTable.filter((pair) => !pair.defend)
 
     if (undefendedCards.length === 0) {
-      setGameMessage("All defended! Play more or pass.")
-      setIsPlayerAttacking(true)
+      setGameMessage("All defended! Throw in more or pass.")
       return
     }
 
     const botDefenseCard = getBotDefenseMove(botHand, undefendedCards[0].attack, botDifficulty, trumpCard!)
 
     if (!botDefenseCard) {
-      setGameMessage("Bot failed to defend!")
-      handleBotFailed(currentTable)
+      setGameMessage("Bot can't defend! Taking all cards.")
+      handleBotFailedDefense(currentTable)
       return
     }
 
@@ -159,139 +250,34 @@ export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExit
     setBotHand(newBotHand)
     setTableCards([...currentTable])
 
-    setTimeout(() => simulateBotAttack(currentTable, newBotHand), 1000)
+    const allDefended = currentTable.every((pair) => pair.defend)
+    if (allDefended) {
+      setGameMessage("Bot defended all! Throw in more or pass.")
+    } else {
+      setBotThinking(true)
+      setTimeout(() => {
+        setBotThinking(false)
+        simulateBotDefense([...currentTable])
+      }, 1000)
+    }
   }
 
-  const simulateBotAttack = (currentTable: Array<{ attack: Card; defend?: Card }>, botCards: Card[]) => {
-    const maxAttacks = hand.length
-    if (currentTable.length >= maxAttacks) {
-      setGameMessage("Maximum attacks reached. Pass or defend.")
-      setIsPlayerAttacking(true)
-      return
-    }
-
-    // Get valid ranks on table
-    const validRanks = new Set<string>()
-    currentTable.forEach((pair) => {
-      validRanks.add(pair.attack.rank)
-      if (pair.defend) validRanks.add(pair.defend.rank)
-    })
-
-    // Find bot cards matching valid ranks
-    const matchingCards = botCards.filter((card) => validRanks.has(card.rank))
-
-    if (matchingCards.length === 0) {
-      setGameMessage("Bot passes. Your turn to continue or end.")
-      setIsPlayerAttacking(true)
-      setDefenderPassed(true)
-      return
-    }
-
-    // Bot plays a matching card (prefer smart selection by difficulty)
-    const botAttackCard = matchingCards[Math.floor(Math.random() * matchingCards.length)]
-    const newTable = [...currentTable, { attack: botAttackCard }]
-    const newBotHand = botCards.filter((c) => c !== botAttackCard)
-
-    setTableCards(newTable)
-    setBotHand(newBotHand)
-    setAttackCount(newTable.length) // Update attack count
-    setGameMessage("Bot attacked! Defend the new card.")
-    setIsPlayerAttacking(true)
-  }
-
-  const handleBotFailed = (currentTable: Array<{ attack: Card; defend?: Card }>) => {
+  const handleBotFailedDefense = (currentTable: Array<{ attack: Card; defend?: Card }>) => {
     const allCards = currentTable.flatMap((pair) => [pair.attack, ...(pair.defend ? [pair.defend] : [])])
     const newBotHand = [...botHand, ...allCards]
 
     setBotHand(newBotHand)
     setTableCards([])
     setGameActive(false)
-    setAttackCount(0) // Reset attack count
-    setDefenderPassed(false)
 
-    if (deck.length === 0 && hand.length > 0) {
-      setTimeout(() => {
-        setGameOver(true)
-        setDurak("player")
-      }, 1500)
-    } else {
-      setTimeout(() => nextRound("player"), 1500)
-    }
-  }
-
-  const nextRound = (winner: "player" | "bot") => {
-    setRoundCount(roundCount + 1)
-    setTableCards([])
-    setSelectedCardIndex(null)
-    setGameActive(true)
-
-    const newDeck = [...deck]
-
-    // Also swap roles: if defender won, they attack next round; if they lost, they sit out
-    let newPlayerRole: "attacker" | "defender" = playerRole
-    let newBotRole: "attacker" | "defender" = botRole
-
-    // If defender succeeded, they become attacker next round
-    if (winner === "player" && playerRole === "defender") {
-      newPlayerRole = "attacker"
-      newBotRole = "defender"
-    } else if (winner === "bot" && botRole === "defender") {
-      newBotRole = "attacker"
-      newPlayerRole = "defender"
-    }
-
-    // Draw order: ATTACKERS FIRST
-    if (newPlayerRole === "attacker" && hand.length < 6) {
-      const drawCount = Math.min(6 - hand.length, newDeck.length)
-      const newCards = newDeck.splice(0, drawCount)
-      setHand([...hand, ...newCards])
-    } else if (newBotRole === "attacker" && botHand.length < 6) {
-      const drawCount = Math.min(6 - botHand.length, newDeck.length)
-      const newCards = newDeck.splice(0, drawCount)
-      setBotHand([...botHand, ...newCards])
-    }
-
-    // Draw order: DEFENDER LAST
-    if (newPlayerRole === "defender" && hand.length < 6) {
-      const drawCount = Math.min(6 - hand.length, newDeck.length)
-      const newCards = newDeck.splice(0, drawCount)
-      setHand([...hand, ...newCards])
-    } else if (newBotRole === "defender" && botHand.length < 6) {
-      const drawCount = Math.min(6 - botHand.length, newDeck.length)
-      const newCards = newDeck.splice(0, drawCount)
-      setBotHand([...botHand, ...newCards])
-    }
-
-    setDeck(newDeck)
-    setPlayerRole(newPlayerRole)
-    setBotRole(newBotRole)
-
-    // Check win condition - first with 0 cards when deck empty wins
-    if (newDeck.length === 0) {
-      if (hand.length === 0) {
-        setGameOver(true)
-        setDurak("bot")
-        return
-      }
-      if (botHand.length === 0) {
-        setGameOver(true)
-        setDurak("player")
-        return
-      }
-    }
-
-    const playerAttacksNext = newPlayerRole === "attacker"
-    setIsPlayerAttacking(playerAttacksNext)
-    setGameMessage(playerAttacksNext ? "You attack next. Play a card." : "Bot attacks. Prepare to defend.")
-    setAttackCount(0) // Reset attack count for new round
-    setDefenderPassed(false)
+    setTimeout(() => endRound("defender-loses", hand, newBotHand, deck), 1500)
   }
 
   const handlePassAttack = () => {
-    if (isPlayerAttacking) {
-      setGameMessage("You passed. Defender wins!")
+    if (playerRole === "attacker" && tableCards.length > 0) {
+      setGameMessage("You passed. Defender wins round!")
       setGameActive(false)
-      setTimeout(() => nextRound("bot"), 1500)
+      setTimeout(() => endRound("defender-wins", hand, botHand, deck), 1500)
     }
   }
 
@@ -299,26 +285,163 @@ export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExit
     const allCards = tableCards.flatMap((pair) => [pair.attack, ...(pair.defend ? [pair.defend] : [])])
     const newHand = [...hand, ...allCards]
     setHand(newHand)
-    setGameMessage("You took cards. Next round...")
+    setGameMessage("You took cards.")
     setGameActive(false)
     setTableCards([])
 
-    const newDeck = [...deck]
+    setTimeout(() => endRound("defender-loses", newHand, botHand, deck), 1500)
+  }
+
+  const endRound = (
+    result: "defender-wins" | "defender-loses",
+    currentPlayerHand: Card[],
+    currentBotHand: Card[],
+    currentDeck: Card[],
+  ) => {
+    console.log("[v0] endRound called", {
+      result,
+      playerHandSize: currentPlayerHand.length,
+      botHandSize: currentBotHand.length,
+    })
+
+    setRoundCount(roundCount + 1)
+    setTableCards([])
+    setSelectedCardIndex(null)
+
+    const newDeck = [...currentDeck]
+    let playerHand = [...currentPlayerHand]
+    let botHandCards = [...currentBotHand]
+
+    if (result === "defender-wins") {
+      if (playerRole === "attacker" && playerHand.length < 6) {
+        const drawCount = Math.min(6 - playerHand.length, newDeck.length)
+        const newCards = newDeck.splice(0, drawCount)
+        playerHand = [...playerHand, ...newCards]
+      } else if (botRole === "attacker" && botHandCards.length < 6) {
+        const drawCount = Math.min(6 - botHandCards.length, newDeck.length)
+        const newCards = newDeck.splice(0, drawCount)
+        botHandCards = [...botHandCards, ...newCards]
+      }
+
+      if (playerRole === "defender" && playerHand.length < 6) {
+        const drawCount = Math.min(6 - playerHand.length, newDeck.length)
+        const newCards = newDeck.splice(0, drawCount)
+        playerHand = [...playerHand, ...newCards]
+      } else if (botRole === "defender" && botHandCards.length < 6) {
+        const drawCount = Math.min(6 - botHandCards.length, newDeck.length)
+        const newCards = newDeck.splice(0, drawCount)
+        botHandCards = [...botHandCards, ...newCards]
+      }
+
+      const newPlayerRole = playerRole === "defender" ? "attacker" : "defender"
+      const newBotRole = botRole === "defender" ? "attacker" : "defender"
+      setPlayerRole(newPlayerRole)
+      setBotRole(newBotRole)
+      setIsPlayerAttacking(newPlayerRole === "attacker")
+    } else {
+      if (playerRole === "attacker" && playerHand.length < 6) {
+        const drawCount = Math.min(6 - playerHand.length, newDeck.length)
+        const newCards = newDeck.splice(0, drawCount)
+        playerHand = [...playerHand, ...newCards]
+      } else if (botRole === "attacker" && botHandCards.length < 6) {
+        const drawCount = Math.min(6 - botHandCards.length, newDeck.length)
+        const newCards = newDeck.splice(0, drawCount)
+        botHandCards = [...botHandCards, ...newCards]
+      }
+
+      if (playerRole === "defender" && playerHand.length < 6) {
+        const drawCount = Math.min(6 - playerHand.length, newDeck.length)
+        const newCards = newDeck.splice(0, drawCount)
+        playerHand = [...playerHand, ...newCards]
+      } else if (botRole === "defender" && botHandCards.length < 6) {
+        const drawCount = Math.min(6 - botHandCards.length, newDeck.length)
+        const newCards = newDeck.splice(0, drawCount)
+        botHandCards = [...botHandCards, ...newCards]
+      }
+    }
+
+    setGameActive(true)
+    console.log("[v0] Game set to active")
 
     if (newDeck.length === 0) {
-      if (newHand.length === 0) {
+      if (playerHand.length === 0 && !playerSafe) {
+        setPlayerSafe(true)
+
+        if (botHandCards.length > 0) {
+          setGameMessage("You escaped! Bot continues playing...")
+        } else {
+          setGameMessage("Draw! Both players escaped!")
+          setGameOver(true)
+          setGameActive(false)
+          return
+        }
+      }
+      if (botHandCards.length === 0 && !botSafe) {
+        setBotSafe(true)
+
+        if (playerHand.length > 0) {
+          setGameMessage("Bot escaped! You are the Durak!")
+          setGameOver(true)
+          setDurak("player")
+          setGameActive(false)
+          return
+        } else {
+          setGameMessage("Draw! Both players escaped!")
+          setGameOver(true)
+          setGameActive(false)
+          return
+        }
+      }
+
+      if (playerSafe && playerHand.length === 0 && botHandCards.length > 0) {
+        setGameMessage("Bot is the Durak!")
         setGameOver(true)
         setDurak("bot")
+        setGameActive(false)
         return
       }
-      if (botHand.length === 0) {
+      if (botSafe && botHandCards.length === 0 && playerHand.length > 0) {
+        setGameMessage("You are the Durak!")
         setGameOver(true)
         setDurak("player")
+        setGameActive(false)
         return
       }
     }
 
-    setTimeout(() => nextRound("bot"), 1500)
+    if (playerRole === "attacker" && result === "defender-wins") {
+      setGameMessage("You defended! Now you attack.")
+    } else if (botRole === "attacker" && result === "defender-wins") {
+      setGameMessage("Bot defended! Now bot attacks.")
+      setTimeout(() => startBotAttack(botHandCards), 1500)
+    } else if (playerRole === "defender" && result === "defender-loses") {
+      setGameMessage("Bot attacks again!")
+      setTimeout(() => startBotAttack(botHandCards), 1500)
+    } else if (botRole === "defender" && result === "defender-loses") {
+      setGameMessage("You attack again!")
+    } else {
+      if (playerRole === "attacker") {
+        setGameMessage("You attack!")
+      } else {
+        setGameMessage("Bot attacks!")
+        setTimeout(() => startBotAttack(botHandCards), 1500)
+      }
+    }
+  }
+
+  const startBotAttack = (botCards: Card[]) => {
+    setBotThinking(true)
+    setTimeout(() => {
+      setBotThinking(false)
+      const botCard = generateBotMove(botCards, [], botDifficulty)
+      if (botCard) {
+        const newTable = [{ attack: botCard }]
+        const newBotCards = botCards.filter((c) => c !== botCard)
+        setTableCards(newTable)
+        setBotHand(newBotCards)
+        setGameMessage("Bot attacked! Defend or take cards.")
+      }
+    }, 1000)
   }
 
   return (
@@ -343,6 +466,13 @@ export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExit
       <div className="mb-6 p-4 bg-card border border-border rounded-lg text-center">
         <p className="text-muted-foreground">{gameMessage}</p>
         {roundCount > 0 && <p className="text-xs text-muted-foreground mt-1">Round {roundCount}</p>}
+        {botThinking && (
+          <div className="mt-2 flex items-center justify-center gap-2">
+            <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: "0ms" }}></div>
+            <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: "150ms" }}></div>
+            <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: "300ms" }}></div>
+          </div>
+        )}
       </div>
 
       <div className="mb-8 p-4 rounded-xl border-2 border-border bg-card">
@@ -403,12 +533,34 @@ export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExit
           <div className="space-y-4 w-full">
             {tableCards.map((pair, idx) => (
               <div key={idx} className="flex items-center justify-center gap-4">
-                <div className="w-16 h-24 bg-gradient-to-br from-primary to-accent rounded-lg flex items-center justify-center text-primary-foreground font-bold shadow-lg">
-                  {pair.attack.rank}
+                <div className="w-20 h-28 bg-gradient-to-br from-primary to-accent rounded-lg flex items-center justify-center text-primary-foreground font-bold shadow-lg">
+                  <div className="flex flex-col items-center">
+                    <span className="text-xl">{pair.attack.rank}</span>
+                    <span className="text-2xl mt-1">
+                      {pair.attack.suit === "hearts"
+                        ? "♥"
+                        : pair.attack.suit === "diamonds"
+                          ? "♦"
+                          : pair.attack.suit === "clubs"
+                            ? "♣"
+                            : "♠"}
+                    </span>
+                  </div>
                 </div>
                 {pair.defend && (
-                  <div className="w-16 h-24 bg-gradient-to-br from-secondary to-card rounded-lg flex items-center justify-center text-foreground font-bold shadow-lg border-2 border-primary transform -translate-x-2 translate-y-2">
-                    {pair.defend.rank}
+                  <div className="w-20 h-28 bg-gradient-to-br from-secondary to-card rounded-lg flex items-center justify-center text-foreground font-bold shadow-lg border-2 border-primary transform -translate-x-2 translate-y-2">
+                    <div className="flex flex-col items-center">
+                      <span className="text-xl">{pair.defend.rank}</span>
+                      <span className="text-2xl mt-1">
+                        {pair.defend.suit === "hearts"
+                          ? "♥"
+                          : pair.defend.suit === "diamonds"
+                            ? "♦"
+                            : pair.defend.suit === "clubs"
+                              ? "♣"
+                              : "♠"}
+                      </span>
+                    </div>
                   </div>
                 )}
               </div>
@@ -426,7 +578,7 @@ export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExit
 
       {!gameOver && gameActive && (
         <div className="flex gap-3 justify-center mt-6">
-          {isPlayerAttacking ? (
+          {playerRole === "attacker" ? (
             <button
               onClick={handlePassAttack}
               className="px-6 py-3 bg-card hover:bg-secondary border border-border text-foreground font-bold rounded-lg transition-all"
@@ -434,20 +586,12 @@ export function GameBoard({ userInfo, gameMode, botDifficulty = "medium", onExit
               Pass Attack
             </button>
           ) : (
-            <>
-              <button
-                onClick={handleTakeCards}
-                className="px-6 py-3 bg-destructive hover:bg-destructive/90 text-destructive-foreground font-bold rounded-lg transition-all"
-              >
-                Take Cards
-              </button>
-              <button
-                onClick={handlePassAttack}
-                className="px-6 py-3 bg-primary hover:bg-accent text-primary-foreground font-bold rounded-lg transition-all"
-              >
-                Defend
-              </button>
-            </>
+            <button
+              onClick={handleTakeCards}
+              className="px-6 py-3 bg-destructive hover:bg-destructive/90 text-destructive-foreground font-bold rounded-lg transition-all"
+            >
+              Take Cards
+            </button>
           )}
         </div>
       )}
